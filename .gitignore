@@ -1,0 +1,23 @@
+# Dependencies & build artifacts
+node_modules/
+app/node_modules/
+app/out/
+app/.webpack/
+__pycache__/
+*.pyc
+
+# Large local binaries & upstream reference clones (restored via setup.ps1)
+bin/*.exe
+bin/*.msi
+vendor/
+
+# Private candidate CV, JD, and generated cheatsheets
+user-data/*
+!user-data/*.example.*
+
+# Secrets, logs, OS files
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db
