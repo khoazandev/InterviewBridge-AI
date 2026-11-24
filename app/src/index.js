@@ -5,7 +5,67 @@ if (require('electron-squirrel-startup')) {
 const { app, BrowserWindow, shell, ipcMain, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const { execFileSync } = require('child_process');
+
+function extractDocxText(buffer) {
+    let eocdOffset = -1;
+    const minOffset = Math.max(0, buffer.length - 65557);
+    for (let i = buffer.length - 22; i >= minOffset; i--) {
+        if (buffer.readUInt32LE(i) === 0x06054b50 && i + 22 + buffer.readUInt16LE(i + 20) <= buffer.length) {
+            eocdOffset = i;
+            break;
+        }
+    }
+    if (eocdOffset === -1) {
+        throw new Error('Invalid DOCX archive (missing End of Central Directory).');
+    }
+
+    const totalEntries = buffer.readUInt16LE(eocdOffset + 10);
+    let cdOffset = buffer.readUInt32LE(eocdOffset + 16);
+    for (let idx = 0; idx < totalEntries && cdOffset + 46 <= buffer.length; idx++) {
+        if (buffer.readUInt32LE(cdOffset) !== 0x02014b50) break;
+        const method = buffer.readUInt16LE(cdOffset + 10);
+        const compressedSize = buffer.readUInt32LE(cdOffset + 20);
+        const nameLen = buffer.readUInt16LE(cdOffset + 28);
+        const extraLen = buffer.readUInt16LE(cdOffset + 30);
+        const commentLen = buffer.readUInt16LE(cdOffset + 32);
+        const localHeaderOffset = buffer.readUInt32LE(cdOffset + 42);
+        const fileName = buffer.slice(cdOffset + 46, cdOffset + 46 + nameLen).toString('utf8');
+
+        if (fileName === 'word/document.xml') {
+            if (buffer.readUInt32LE(localHeaderOffset) !== 0x04034b50) {
+                throw new Error('Invalid DOCX local entry header.');
+            }
+            const lNameLen = buffer.readUInt16LE(localHeaderOffset + 26);
+            const lExtraLen = buffer.readUInt16LE(localHeaderOffset + 28);
+            const dataStart = localHeaderOffset + 30 + lNameLen + lExtraLen;
+            const compressed = buffer.slice(dataStart, dataStart + compressedSize);
+            let xml = '';
+            if (method === 0) {
+                xml = compressed.toString('utf8');
+            } else if (method === 8) {
+                xml = zlib.inflateRawSync(compressed).toString('utf8');
+            } else {
+                throw new Error(`Unsupported DOCX compression method: ${method}`);
+            }
+            return xml
+                .replace(/<\/w:p>/g, '\n')
+                .replace(/<w:tab\b[^>]*\/>/g, ' ')
+                .replace(/<w:br\b[^>]*\/>/g, '\n')
+                .replace(/<[^>]+>/g, '')
+                .replace(/&amp;/g, '&')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&quot;/g, '"')
+                .replace(/&apos;/g, "'")
+                .replace(/\n{3,}/g, '\n\n')
+                .trim();
+        }
+        cdOffset += 46 + nameLen + extraLen + commentLen;
+    }
+    throw new Error('Could not find word/document.xml inside DOCX file.');
+}
 const { createWindow, updateGlobalShortcuts } = require('./utils/window');
 const { setupGeminiIpcHandlers, stopMacOSAudioCapture, sendToRenderer } = require('./utils/gemini');
 const storage = require('./storage');
@@ -301,15 +361,33 @@ function setupGeneralIpcHandlers() {
             const filePath = result.filePaths[0];
             const ext = path.extname(filePath).toLowerCase();
             let text = '';
-            if (ext === '.txt' || ext === '.md') {
+            if (ext === '.txt' || ext === '.md' || ext === '.json') {
                 text = fs.readFileSync(filePath, 'utf8');
+            } else if (ext === '.docx') {
+                text = extractDocxText(fs.readFileSync(filePath));
             } else {
-                const scriptPath = path.resolve(__dirname, '../../scripts/context_builder.py');
-                text = execFileSync('python', [scriptPath, '--extract', filePath], {
-                    encoding: 'utf8',
-                    maxBuffer: 10 * 1024 * 1024,
-                    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-                });
+                const scriptPath = app.isPackaged
+                    ? path.join(process.resourcesPath, 'context_builder.py')
+                    : path.resolve(__dirname, '../../scripts/context_builder.py');
+                let lastError = null;
+                for (const pyCmd of ['python', 'py']) {
+                    try {
+                        text = execFileSync(pyCmd, [scriptPath, '--extract', filePath], {
+                            encoding: 'utf8',
+                            maxBuffer: 10 * 1024 * 1024,
+                            env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+                        });
+                        lastError = null;
+                        break;
+                    } catch (err) {
+                        lastError = err;
+                    }
+                }
+                if (lastError) {
+                    throw new Error(
+                        `PDF extraction requires Python + pypdf (or import a .docx / .txt / .md file instead). Details: ${lastError.message}`
+                    );
+                }
             }
             return { success: true, fileName: path.basename(filePath), text: text.trim() };
         } catch (error) {

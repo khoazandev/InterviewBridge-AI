@@ -1,0 +1,26 @@
+{
+  "name": "interview-bridge-ai",
+  "version": "1.0.0",
+  "description": "CLI & Agent Skill installer for InterviewBridge AI — Real-time Bilingual (EN->VI) CV+JD Interview Copilot",
+  "bin": {
+    "interview-bridge": "./cli/index.js"
+  },
+  "files": [
+    "cli/",
+    "skills/",
+    "scripts/",
+    "user-data/",
+    "install.ps1",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khoazandev/InterviewBridge-AI.git"
+  },
+  "author": "khoazandev",
+  "license": "GPL-3.0-only"
+}

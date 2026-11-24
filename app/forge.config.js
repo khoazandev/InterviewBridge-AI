@@ -4,8 +4,8 @@ const { FuseV1Options, FuseVersion } = require('@electron/fuses');
 module.exports = {
     packagerConfig: {
         asar: true,
-        extraResource: ['./src/assets/SystemAudioDump'],
-        name: 'Cheating Daddy',
+        extraResource: ['./src/assets/SystemAudioDump', '../scripts/context_builder.py'],
+        name: 'InterviewBridge AI',
         icon: 'src/assets/logo',
         // use `security find-identity -v -p codesigning` to find your identity
         // for macos signing
@@ -30,9 +30,11 @@ module.exports = {
         {
             name: '@electron-forge/maker-squirrel',
             config: {
-                name: 'cheating-daddy',
-                productName: 'Cheating Daddy',
-                shortcutName: 'Cheating Daddy',
+                name: 'InterviewBridgeAI',
+                productName: 'InterviewBridge AI',
+                shortcutName: 'InterviewBridge AI',
+                setupExe: 'InterviewBridge-AI-Setup.exe',
+                setupIcon: './src/assets/logo.ico',
                 createDesktopShortcut: true,
                 createStartMenuShortcut: true,
             },
