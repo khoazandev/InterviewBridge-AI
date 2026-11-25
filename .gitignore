@@ -6,9 +6,8 @@ app/.webpack/
 __pycache__/
 *.pyc
 
-# Large local binaries & upstream reference clones (restored via setup.ps1)
-bin/*.exe
-bin/*.msi
+# Large local binaries, runtime settings, & upstream reference clones
+bin/*
 vendor/
 
 # Private candidate CV, JD, and generated cheatsheets
