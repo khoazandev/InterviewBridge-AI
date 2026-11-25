@@ -122,7 +122,7 @@ function flushSpeechSegment(keepSpeaking = false) {
 function triggerLivePreview() {
     if (isPreviewInFlight || !isLocalActive || !isSpeaking || !whisperBaseUrl) return;
     const snapshot = Buffer.concat(speechBuffers);
-    const windowSlice = snapshot.length > 256000 ? snapshot.slice(snapshot.length - 256000) : snapshot;
+    const windowSlice = snapshot.length > 128000 ? snapshot.slice(snapshot.length - 128000) : snapshot;
     if (windowSlice.length < 16000) return;
 
     isPreviewInFlight = true;
@@ -188,7 +188,7 @@ function processVad(pcm16kBuffer) {
             flushSpeechSegment(true);
             return;
         }
-        if (!isPreviewInFlight && speechBytesAccumulated >= 56000 && speechBytesAccumulated - lastPreviewBytes >= 56000) {
+        if (!isPreviewInFlight && speechBytesAccumulated >= 80000 && speechBytesAccumulated - lastPreviewBytes >= 80000) {
             triggerLivePreview();
         }
     }
@@ -243,19 +243,43 @@ async function transcribeAudio(pcm16kBuffer) {
     return { text, viText };
 }
 
-function isNonQuestionFiller(text) {
-    if (localConversationHistory.length === 0) return false;
+function shouldSkipSuggestionCard(text) {
     const clean = String(text || '').trim();
-    if (!clean || clean.includes('?')) return false;
-    const wordCount = clean.split(/\s+/).length;
-    if (wordCount > 10) return false;
-    const hasQuestionOrTopicKeyword = /\b(what|why|how|when|where|who|which|can|could|would|will|do|does|did|have|has|are|is|tell|walk|describe|explain|share|introduce|experience|project|strength|weakness|salary|graduate|available|question|ielts|moderation|tiktok)\b/i.test(
-        clean
-    );
-    if (hasQuestionOrTopicKeyword) return false;
-    return /^(okay|ok|alright|sure|great|awesome|perfect|thank you|thanks|no problem|got it|sounds good|take your time|go ahead|whenever you|let's get into it|please go ahead|keep this|keep it)\b/i.test(
-        clean
-    );
+    if (!clean) return true;
+
+    if (currentProfile === 'hr_bilingual' && matchPlaybookAnswer(clean)) {
+        return false;
+    }
+
+    const words = clean.split(/\s+/);
+    const wordCount = words.length;
+
+    // Clipped mid-word/mid-phrase fragment when speaker pauses abruptly
+    if (wordCount <= 6 && /[-–—…]$/.test(clean) && !clean.includes('?')) {
+        return true;
+    }
+
+    // Ultra-short fragment without question or greeting intent
+    if (
+        wordCount <= 3 &&
+        !clean.includes('?') &&
+        !/\b(hello|hi|hey|ready|why|what|how|when|where|who|tell|introduce|explain|describe|share|walk)\b/i.test(clean)
+    ) {
+        return true;
+    }
+
+    // Non-question side remark when an answer card is already displayed
+    if (localConversationHistory.length > 0 && wordCount <= 12 && !clean.includes('?')) {
+        const hasTopicOrQuestionKeyword =
+            /\b(what|why|how|when|where|who|which|tell|walk|describe|explain|share|introduce|elaborate|experience|project|internship|strength|weakness|salary|compensation|graduate|available|question|ielts|moderation|safety|tiktok|team|challenge|bug|conflict|goal)\b/i.test(
+                clean
+            );
+        if (!hasTopicOrQuestionKeyword) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 async function handleSpeechEnd(audioData) {
@@ -282,8 +306,8 @@ async function handleSpeechEnd(audioData) {
         }
 
         sendToRenderer('live-transcript', { en: transcription, vi: viText });
-        if (isNonQuestionFiller(transcription)) {
-            console.log('[LocalAI] Filler remark detected, keeping active suggestion card:', transcription);
+        if (shouldSkipSuggestionCard(transcription)) {
+            console.log('[LocalAI] Skipped fragment/side-remark, preserving active suggestion card:', transcription);
             if (!isGeneratingLlama) {
                 sendToRenderer('update-status', 'Listening...');
             }
@@ -338,7 +362,7 @@ async function requestLlama(messages, onText, options = {}) {
         messages,
         stream: true,
         temperature: 0.2,
-        max_tokens: options.maxTokens || 450,
+        max_tokens: options.maxTokens || 650,
     };
     if (!ollamaTag) {
         payload.cache_prompt = true;
@@ -396,6 +420,15 @@ async function drainLlamaQueue() {
     }
 }
 
+function appendLocalHistory(userText, assistantText) {
+    localConversationHistory.push({ role: 'user', content: userText });
+    localConversationHistory.push({ role: 'assistant', content: assistantText });
+    if (localConversationHistory.length > 6) {
+        localConversationHistory = localConversationHistory.slice(-6);
+    }
+    saveConversationTurn(userText, assistantText);
+}
+
 async function sendToLlama(transcription, viHint = '') {
     const cleanEn = transcription.trim();
     const cleanVi = String(viHint || '').trim();
@@ -404,12 +437,7 @@ async function sendToLlama(transcription, viHint = '') {
         const playbookMarkdown = matchPlaybookAnswer(cleanEn, cleanVi);
         if (playbookMarkdown) {
             sendToRenderer('new-response', playbookMarkdown);
-            localConversationHistory.push({ role: 'user', content: cleanEn });
-            localConversationHistory.push({ role: 'assistant', content: playbookMarkdown });
-            if (localConversationHistory.length > 8) {
-                localConversationHistory = localConversationHistory.slice(-8);
-            }
-            saveConversationTurn(cleanEn, playbookMarkdown);
+            appendLocalHistory(cleanEn, playbookMarkdown);
             console.log('[LocalAI] Served 0ms Playbook match');
             if (pendingUtterances.length === 0) {
                 sendToRenderer('update-status', 'Listening...');
@@ -421,7 +449,7 @@ async function sendToLlama(transcription, viHint = '') {
     const promptUserContent = cleanVi ? `Interviewer (EN): ${cleanEn}\n(Vietnamese meaning: ${cleanVi})` : cleanEn;
 
     try {
-        const priorHistory = localConversationHistory.slice(-6);
+        const priorHistory = localConversationHistory.slice(-4);
         const messages = [
             { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
             ...priorHistory,
@@ -435,12 +463,7 @@ async function sendToLlama(transcription, viHint = '') {
         });
 
         if (fullText.trim()) {
-            localConversationHistory.push({ role: 'user', content: cleanEn });
-            localConversationHistory.push({ role: 'assistant', content: fullText.trim() });
-            if (localConversationHistory.length > 8) {
-                localConversationHistory = localConversationHistory.slice(-8);
-            }
-            saveConversationTurn(cleanEn, fullText);
+            appendLocalHistory(cleanEn, fullText.trim());
         }
 
         console.log('[LocalAI] Llama response completed');
@@ -577,10 +600,14 @@ async function startLlamaServer(executablePath, modelPath, projectorPath = null,
         String(port),
         '--alias',
         'local',
+        '-np',
+        '1',
         '-c',
-        '4096',
-        '--cache-reuse',
-        '256',
+        '8192',
+        '--reasoning',
+        'off',
+        '--reasoning-budget',
+        '0',
         '-m',
         modelPath,
     ];
@@ -928,7 +955,7 @@ async function sendLocalImage(base64Data, prompt) {
         sendToRenderer('update-status', 'Analyzing image...');
         const messages = [
             { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
-            ...localConversationHistory.slice(-6),
+            ...localConversationHistory.slice(-4),
             userMessage,
         ];
 
@@ -939,12 +966,7 @@ async function sendLocalImage(base64Data, prompt) {
         });
 
         if (fullText.trim()) {
-            localConversationHistory.push({ role: 'user', content: prompt });
-            localConversationHistory.push({ role: 'assistant', content: fullText.trim() });
-            if (localConversationHistory.length > 8) {
-                localConversationHistory = localConversationHistory.slice(-8);
-            }
-            saveConversationTurn(prompt, fullText);
+            appendLocalHistory(prompt, fullText.trim());
         }
 
         sendToRenderer('update-status', 'Listening...');

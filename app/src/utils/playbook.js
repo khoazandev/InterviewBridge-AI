@@ -79,14 +79,21 @@ function formatPlaybookResponse(entry, enText, viText = '') {
     const cleanVi = String(viText || '').trim() || entry.viQuestion || '';
     const lines = [
         `**🎧 HR vừa nói (EN):** ${cleanEn}`,
-        `**🇻🇳 Dịch nghĩa (VI):** ${cleanVi}`,
+        `**🇻🇳 Dịch nghĩa & Ý HR muốn hỏi (VI):** ${cleanVi}`,
     ];
     if (entry.missingNoteVi) {
         lines.push(`*${entry.missingNoteVi}*`);
     }
-    lines.push('**⚡ Gợi ý chuẩn Agent (0ms · 100% CV thật):**');
+    lines.push('**⚡ Gợi ý trả lời chi tiết (0ms · 100% CV thật):**');
     for (const bullet of entry.bullets || []) {
         lines.push(`- ${bullet}`);
+    }
+    if (Array.isArray(entry.followUps) && entry.followUps.length > 0) {
+        lines.push('');
+        lines.push('**🔄 Gợi ý nói lại / Chốt câu với HR (chọn 1 câu):**');
+        for (const reply of entry.followUps) {
+            lines.push(`- ${reply}`);
+        }
     }
     if (entry.tipVi) {
         lines.push('');
