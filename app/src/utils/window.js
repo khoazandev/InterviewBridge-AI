@@ -35,11 +35,21 @@ function createWindow(sendToRenderer, geminiSessionRef) {
     const { session, desktopCapturer } = require('electron');
     session.defaultSession.setDisplayMediaRequestHandler(
         (request, callback) => {
-            desktopCapturer.getSources({ types: ['screen'] }).then(sources => {
-                callback({ video: sources[0], audio: 'loopback' });
-            });
+            desktopCapturer
+                .getSources({ types: ['screen'] })
+                .then(sources => {
+                    if (!sources || sources.length === 0) {
+                        callback({});
+                        return;
+                    }
+                    callback({ video: sources[0], audio: 'loopback' });
+                })
+                .catch(err => {
+                    console.error('Failed to get desktop sources:', err);
+                    callback({});
+                });
         },
-        { useSystemPicker: true }
+        { useSystemPicker: false }
     );
 
     mainWindow.setContentProtection(true);

@@ -322,9 +322,9 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
                 audio: {
                     sampleRate: SAMPLE_RATE,
                     channelCount: 1,
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
                 },
             });
 
@@ -401,64 +401,56 @@ function setupLinuxMicProcessing(micStream) {
     micAudioProcessor = micProcessor;
 }
 
-function setupLinuxSystemAudioProcessing() {
-    // Setup system audio processing for Linux (from getDisplayMedia)
+function setupSystemAudioProcessing(platformLabel) {
+    if (!mediaStream || mediaStream.getAudioTracks().length === 0) {
+        console.warn(`[${platformLabel}] No system audio track available in display media stream`);
+        cheatingDaddy.setStatus('Warning: System audio unavailable — check speaker output');
+        return;
+    }
+
     audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+    if (audioContext.state === 'suspended') {
+        audioContext.resume().catch(() => {});
+    }
+
     const source = audioContext.createMediaStreamSource(mediaStream);
     audioProcessor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
 
-    let audioBuffer = [];
+    let pendingSamples = [];
     const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
 
-    audioProcessor.onaudioprocess = async e => {
+    audioProcessor.onaudioprocess = e => {
         const inputData = e.inputBuffer.getChannelData(0);
-        audioBuffer.push(...inputData);
+        pendingSamples.push(...inputData);
 
-        // Process audio in chunks
-        while (audioBuffer.length >= samplesPerChunk) {
-            const chunk = audioBuffer.splice(0, samplesPerChunk);
+        while (pendingSamples.length >= samplesPerChunk) {
+            const chunk = pendingSamples.splice(0, samplesPerChunk);
             const pcmData16 = convertFloat32ToInt16(chunk);
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
 
-            await ipcRenderer.invoke('send-audio-content', {
-                data: base64Data,
-                mimeType: 'audio/pcm;rate=24000',
-            });
+            ipcRenderer
+                .invoke('send-audio-content', {
+                    data: base64Data,
+                    mimeType: 'audio/pcm;rate=24000',
+                })
+                .catch(() => {});
         }
     };
 
+    // Route through a zero-gain node so loopback capture never echoes back to speakers
+    const silentGain = audioContext.createGain();
+    silentGain.gain.value = 0;
     source.connect(audioProcessor);
-    audioProcessor.connect(audioContext.destination);
+    audioProcessor.connect(silentGain);
+    silentGain.connect(audioContext.destination);
+}
+
+function setupLinuxSystemAudioProcessing() {
+    setupSystemAudioProcessing('Linux');
 }
 
 function setupWindowsLoopbackProcessing() {
-    // Setup audio processing for Windows loopback audio only
-    audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
-    const source = audioContext.createMediaStreamSource(mediaStream);
-    audioProcessor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
-
-    let audioBuffer = [];
-    const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
-
-    audioProcessor.onaudioprocess = async e => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        audioBuffer.push(...inputData);
-
-        // Process audio in chunks
-        while (audioBuffer.length >= samplesPerChunk) {
-            const chunk = audioBuffer.splice(0, samplesPerChunk);
-            const pcmData16 = convertFloat32ToInt16(chunk);
-            const base64Data = arrayBufferToBase64(pcmData16.buffer);
-
-            await ipcRenderer.invoke('send-audio-content', {
-                data: base64Data,
-                mimeType: 'audio/pcm;rate=24000',
-            });
-        }
-    };
-
-    source.connect(audioProcessor);
-    audioProcessor.connect(audioContext.destination);
+    setupSystemAudioProcessing('Windows');
 }
 
 async function captureScreenshot(imageQuality = 'medium', isManual = false) {

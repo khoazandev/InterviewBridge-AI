@@ -2,12 +2,19 @@ const crypto = require('crypto');
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
-const { spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { getConfigDir } = require('../storage');
 
 const RELEASE_BASE_URL = 'https://github.com/sohzm/cheating-daddy/releases/download/v0.7.0';
+const WIN_VULKAN_LLAMA_RELEASE = {
+    tag: 'b12719',
+    filename: 'llama-b12719-bin-win-vulkan-x64.zip',
+    url: 'https://github.com/ggml-org/llama.cpp/releases/download/b12719/llama-b12719-bin-win-vulkan-x64.zip',
+    sha256: '063ddd2a5daf02652ae5938068b56a8a5124a11a0a41f700bd7c09b624173e55',
+    dirName: 'llama-vulkan-b12719',
+};
 
 const BINARY_RELEASES = {
     darwin: {
@@ -156,7 +163,85 @@ async function installVerifiedFile({ url, destinationPath, sha256, executable, o
     return destinationPath;
 }
 
+function findFileRecursive(dirPath, targetFilename) {
+    if (!fs.existsSync(dirPath)) return null;
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+        const fullPath = path.join(dirPath, entry.name);
+        if (entry.isFile() && entry.name.toLowerCase() === targetFilename.toLowerCase()) {
+            return fullPath;
+        }
+        if (entry.isDirectory()) {
+            const nested = findFileRecursive(fullPath, targetFilename);
+            if (nested) return nested;
+        }
+    }
+    return null;
+}
+
+function extractArchive(zipPath, extractDir) {
+    fs.mkdirSync(extractDir, { recursive: true });
+    try {
+        execFileSync('tar.exe', ['-xf', zipPath, '-C', extractDir], { windowsHide: true, stdio: 'pipe' });
+        return;
+    } catch {
+        const escapedZip = zipPath.replace(/'/g, "''");
+        const escapedDir = extractDir.replace(/'/g, "''");
+        execFileSync(
+            'powershell.exe',
+            ['-NoProfile', '-Command', `Expand-Archive -Path '${escapedZip}' -DestinationPath '${escapedDir}' -Force`],
+            { windowsHide: true, stdio: 'pipe' }
+        );
+    }
+}
+
+async function ensureWindowsVulkanLlama(onProgress, signal) {
+    if (!fs.existsSync('C:\\Windows\\System32\\vulkan-1.dll')) {
+        return null;
+    }
+
+    const extractDir = path.join(getBinariesDirectory(), WIN_VULKAN_LLAMA_RELEASE.dirName);
+    const markerPath = path.join(extractDir, '.verified-sha256');
+    const existingServer = findFileRecursive(extractDir, 'llama-server.exe');
+    if (existingServer && fs.existsSync(markerPath) && fs.readFileSync(markerPath, 'utf8').trim() === WIN_VULKAN_LLAMA_RELEASE.sha256) {
+        return existingServer;
+    }
+
+    const zipPath = path.join(getBinariesDirectory(), WIN_VULKAN_LLAMA_RELEASE.filename);
+    await installVerifiedFile({
+        url: WIN_VULKAN_LLAMA_RELEASE.url,
+        destinationPath: zipPath,
+        sha256: WIN_VULKAN_LLAMA_RELEASE.sha256,
+        executable: false,
+        onProgress,
+        signal,
+    });
+
+    fs.rmSync(extractDir, { recursive: true, force: true });
+    extractArchive(zipPath, extractDir);
+    const extractedServer = findFileRecursive(extractDir, 'llama-server.exe');
+    if (!extractedServer) {
+        throw new Error('llama-server.exe not found inside extracted Vulkan archive');
+    }
+
+    fs.writeFileSync(markerPath, WIN_VULKAN_LLAMA_RELEASE.sha256, 'utf8');
+    fs.rmSync(zipPath, { force: true });
+    return extractedServer;
+}
+
 async function ensureNativeBinary(type, onProgress, signal) {
+    if (process.platform === 'win32' && process.arch === 'x64' && type === 'llama') {
+        try {
+            const vulkanPath = await ensureWindowsVulkanLlama(onProgress, signal);
+            if (vulkanPath) {
+                console.log('[Runtime] Using Vulkan GPU llama-server:', vulkanPath);
+                return vulkanPath;
+            }
+        } catch (error) {
+            if (error.name === 'AbortError') throw error;
+            console.warn('[Runtime] Vulkan llama setup failed, falling back to CPU binary:', error.message);
+        }
+    }
+
     const release = getPlatformReleases()[type];
     const destinationPath = path.join(getBinariesDirectory(), release.filename);
 
@@ -224,7 +309,7 @@ function parseHuggingFaceModelReference(modelReference) {
     };
 }
 
-async function resolveHuggingFaceGguf(modelReference, signal) {
+async function resolveHuggingFaceGguf(modelReference, signal, requireProjector = false) {
     const { repository, quant } = parseHuggingFaceModelReference(modelReference);
     const repositoryUrl = encodePathParts(repository);
     const response = await fetch(`https://huggingface.co/api/models/${repositoryUrl}/tree/main?recursive=true&expand=true`, { signal });
@@ -249,7 +334,7 @@ async function resolveHuggingFaceGguf(modelReference, signal) {
     }
 
     const projector = files.find(candidate => candidate.type === 'file' && candidate.path === 'mmproj-BF16.gguf');
-    if (!projector?.lfs?.oid || !projector.size) {
+    if (requireProjector && (!projector?.lfs?.oid || !projector.size)) {
         throw new Error(`Hugging Face model ${repository} does not provide mmproj-BF16.gguf`);
     }
 
@@ -259,31 +344,36 @@ async function resolveHuggingFaceGguf(modelReference, signal) {
             path: file.path,
             sha256: file.lfs.oid,
         },
-        projector: {
-            path: projector.path,
-            sha256: projector.lfs.oid,
-        },
+        projector: projector?.lfs?.oid
+            ? {
+                  path: projector.path,
+                  sha256: projector.lfs.oid,
+              }
+            : null,
     };
 }
 
-async function ensureLlamaModel(modelReference, onModelProgress, onProjectorProgress, signal) {
+async function ensureLlamaModel(modelReference, onModelProgress, onProjectorProgress, signal, options = {}) {
+    const { requireProjector = false } = options;
+
     if (path.isAbsolute(modelReference)) {
         if (!fs.existsSync(modelReference)) {
             throw new Error(`Language model does not exist: ${modelReference}`);
         }
 
         const projectorPath = path.join(path.dirname(modelReference), 'mmproj-BF16.gguf');
-        if (!fs.existsSync(projectorPath)) {
+        const projectorExists = fs.existsSync(projectorPath);
+        if (requireProjector && !projectorExists) {
             throw new Error(`Multimodal projector does not exist: ${projectorPath}`);
         }
 
         return {
             modelPath: modelReference,
-            projectorPath,
+            projectorPath: projectorExists ? projectorPath : null,
         };
     }
 
-    const model = await resolveHuggingFaceGguf(modelReference, signal);
+    const model = await resolveHuggingFaceGguf(modelReference, signal, requireProjector);
     const repositoryDirectory = path.join(getModelsDirectory(), 'llama', model.repository);
     const modelPath = await installVerifiedFile({
         url: `https://huggingface.co/${encodePathParts(model.repository)}/resolve/main/${encodePathParts(model.model.path)}`,
@@ -293,14 +383,23 @@ async function ensureLlamaModel(modelReference, onModelProgress, onProjectorProg
         onProgress: onModelProgress,
         signal,
     });
-    const projectorPath = await installVerifiedFile({
-        url: `https://huggingface.co/${encodePathParts(model.repository)}/resolve/main/${encodePathParts(model.projector.path)}`,
-        destinationPath: path.join(repositoryDirectory, path.basename(model.projector.path)),
-        sha256: model.projector.sha256,
-        executable: false,
-        onProgress: onProjectorProgress,
-        signal,
-    });
+
+    let projectorPath = null;
+    if (model.projector) {
+        const localProjectorPath = path.join(repositoryDirectory, path.basename(model.projector.path));
+        if (requireProjector) {
+            projectorPath = await installVerifiedFile({
+                url: `https://huggingface.co/${encodePathParts(model.repository)}/resolve/main/${encodePathParts(model.projector.path)}`,
+                destinationPath: localProjectorPath,
+                sha256: model.projector.sha256,
+                executable: false,
+                onProgress: onProjectorProgress,
+                signal,
+            });
+        } else if (fs.existsSync(localProjectorPath)) {
+            projectorPath = localProjectorPath;
+        }
+    }
 
     return {
         modelPath,

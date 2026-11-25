@@ -18,27 +18,37 @@ const {
 let llamaProcess = null;
 let llamaBaseUrl = null;
 let llamaModel = null;
+let currentLlamaExecutablePath = null;
+let currentLlamaModelPath = null;
+let currentProjectorPath = null;
+let llamaLoadedWithProjector = false;
 let whisperProcess = null;
 let whisperBaseUrl = null;
 let localConversationHistory = [];
 let currentSystemPrompt = null;
+let currentProfile = 'hr_bilingual';
 let isLocalActive = false;
 let initializationController = null;
 let llamaCacheSnapshot = new Set();
 
 let isSpeaking = false;
 let speechBuffers = [];
+let preRollBuffers = [];
+let speechBytesAccumulated = 0;
 let silenceFrameCount = 0;
 let speechFrameCount = 0;
+let pendingUtterances = [];
+let isGeneratingLlama = false;
+let activeQueuePromise = null;
 
 const VAD_MODES = {
-    NORMAL: { energyThreshold: 0.01, speechFramesRequired: 3, silenceFramesRequired: 30 },
-    LOW_BITRATE: { energyThreshold: 0.008, speechFramesRequired: 4, silenceFramesRequired: 35 },
-    AGGRESSIVE: { energyThreshold: 0.015, speechFramesRequired: 2, silenceFramesRequired: 20 },
-    VERY_AGGRESSIVE: { energyThreshold: 0.02, speechFramesRequired: 2, silenceFramesRequired: 15 },
+    NORMAL: { energyThreshold: 0.007, speechFramesRequired: 2, silenceFramesRequired: 6, softFlushBytes: 176000, hardFlushBytes: 288000 },
+    LOW_BITRATE: { energyThreshold: 0.006, speechFramesRequired: 3, silenceFramesRequired: 10, softFlushBytes: 176000, hardFlushBytes: 288000 },
+    AGGRESSIVE: { energyThreshold: 0.01, speechFramesRequired: 2, silenceFramesRequired: 6, softFlushBytes: 176000, hardFlushBytes: 288000 },
+    VERY_AGGRESSIVE: { energyThreshold: 0.007, speechFramesRequired: 2, silenceFramesRequired: 6, softFlushBytes: 176000, hardFlushBytes: 288000 },
 };
 
-let vadConfig = VAD_MODES.VERY_AGGRESSIVE;
+let vadConfig = VAD_MODES.NORMAL;
 let resampleRemainder = Buffer.alloc(0);
 
 function parseOllamaModel(modelRef) {
@@ -84,9 +94,38 @@ function calculateRms(pcm16Buffer) {
     return Math.sqrt(sumSquares / samples);
 }
 
+function stripThinkingTags(text) {
+    return String(text || '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .replace(/<think>[\s\S]*$/i, '')
+        .trim();
+}
+
+function flushSpeechSegment(keepSpeaking = false) {
+    const audioData = Buffer.concat(speechBuffers);
+    speechBuffers = [];
+    speechBytesAccumulated = 0;
+    silenceFrameCount = 0;
+    isSpeaking = keepSpeaking;
+    if (!keepSpeaking) {
+        speechFrameCount = 0;
+    }
+    console.log('[LocalAI] Flushing speech segment:', audioData.length, 'bytes, keepSpeaking:', keepSpeaking);
+    sendToRenderer('update-status', 'Transcribing...');
+    handleSpeechEnd(audioData);
+}
+
 function processVad(pcm16kBuffer) {
     const rms = calculateRms(pcm16kBuffer);
     const isVoice = rms > vadConfig.energyThreshold;
+    const chunkCopy = Buffer.from(pcm16kBuffer);
+
+    if (!isSpeaking) {
+        preRollBuffers.push(chunkCopy);
+        if (preRollBuffers.length > 3) {
+            preRollBuffers.shift();
+        }
+    }
 
     if (isVoice) {
         speechFrameCount += 1;
@@ -94,7 +133,9 @@ function processVad(pcm16kBuffer) {
 
         if (!isSpeaking && speechFrameCount >= vadConfig.speechFramesRequired) {
             isSpeaking = true;
-            speechBuffers = [];
+            speechBuffers = [...preRollBuffers];
+            preRollBuffers = [];
+            speechBytesAccumulated = speechBuffers.reduce((sum, buf) => sum + buf.length, 0);
             console.log('[LocalAI] Speech started (RMS:', rms.toFixed(4), ')');
             sendToRenderer('update-status', 'Listening... (speech detected)');
         }
@@ -102,19 +143,22 @@ function processVad(pcm16kBuffer) {
         silenceFrameCount += 1;
         speechFrameCount = 0;
 
-        if (isSpeaking && silenceFrameCount >= vadConfig.silenceFramesRequired) {
-            isSpeaking = false;
-            const audioData = Buffer.concat(speechBuffers);
-            speechBuffers = [];
-            console.log('[LocalAI] Speech ended, accumulated', audioData.length, 'bytes');
-            sendToRenderer('update-status', 'Transcribing...');
-            handleSpeechEnd(audioData);
+        if (
+            isSpeaking &&
+            (silenceFrameCount >= vadConfig.silenceFramesRequired ||
+                (silenceFrameCount >= 2 && speechBytesAccumulated >= vadConfig.softFlushBytes))
+        ) {
+            flushSpeechSegment(false);
             return;
         }
     }
 
     if (isSpeaking) {
-        speechBuffers.push(Buffer.from(pcm16kBuffer));
+        speechBuffers.push(chunkCopy);
+        speechBytesAccumulated += chunkCopy.length;
+        if (speechBytesAccumulated >= vadConfig.hardFlushBytes) {
+            flushSpeechSegment(true);
+        }
     }
 }
 
@@ -170,24 +214,28 @@ async function transcribeAudio(pcm16kBuffer) {
 async function handleSpeechEnd(audioData) {
     if (!isLocalActive) return;
 
-    if (audioData.length < 16000) {
+    if (audioData.length < 9600) {
         console.log('[LocalAI] Audio too short, skipping');
-        sendToRenderer('update-status', 'Listening...');
+        if (!isGeneratingLlama) {
+            sendToRenderer('update-status', 'Listening...');
+        }
         return;
     }
 
     try {
         const { text: transcription, viText } = await transcribeAudio(audioData);
+        if (!isLocalActive) return;
 
         if (!transcription || transcription.length < 2) {
             console.log('[LocalAI] Empty transcription, skipping');
-            sendToRenderer('update-status', 'Listening...');
+            if (!isGeneratingLlama) {
+                sendToRenderer('update-status', 'Listening...');
+            }
             return;
         }
 
         sendToRenderer('live-transcript', { en: transcription, vi: viText });
-        sendToRenderer('update-status', 'Generating response...');
-        await sendToLlama(transcription);
+        enqueueLlamaTurn(transcription, viText);
     } catch (error) {
         console.error('[LocalAI] Transcription error:', error);
         sendToRenderer('update-status', 'Transcription error: ' + error.message);
@@ -215,14 +263,17 @@ async function readStreamingResponse(response, onText) {
             if (!token) continue;
 
             fullText += token;
-            onText(fullText);
+            const cleanText = stripThinkingTags(fullText);
+            if (cleanText) {
+                onText?.(cleanText);
+            }
         }
     }
 
-    return fullText;
+    return stripThinkingTags(fullText);
 }
 
-async function requestLlama(messages, onText) {
+async function requestLlama(messages, onText, options = {}) {
     if (!llamaBaseUrl) {
         throw new Error('Llama server is not running');
     }
@@ -233,9 +284,10 @@ async function requestLlama(messages, onText) {
         messages,
         stream: true,
         temperature: 0.2,
-        max_tokens: 2048,
+        max_tokens: options.maxTokens || 320,
     };
     if (!ollamaTag) {
+        payload.cache_prompt = true;
         payload.chat_template_kwargs = { enable_thinking: false };
     }
 
@@ -243,6 +295,7 @@ async function requestLlama(messages, onText) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: options.signal,
     });
 
     if (!response.ok || !response.body) {
@@ -253,18 +306,54 @@ async function requestLlama(messages, onText) {
     return readStreamingResponse(response, onText);
 }
 
-async function sendToLlama(transcription) {
-    localConversationHistory.push({
-        role: 'user',
-        content: transcription.trim(),
-    });
-
-    if (localConversationHistory.length > 20) {
-        localConversationHistory = localConversationHistory.slice(-20);
+function enqueueLlamaTurn(enText, viHint = '') {
+    const cleanEn = String(enText || '').trim();
+    if (!cleanEn) {
+        return Promise.resolve();
     }
 
+    pendingUtterances.push({ en: cleanEn, vi: String(viHint || '').trim() });
+    if (!activeQueuePromise) {
+        activeQueuePromise = drainLlamaQueue().finally(() => {
+            activeQueuePromise = null;
+        });
+    }
+    return activeQueuePromise;
+}
+
+async function drainLlamaQueue() {
+    isGeneratingLlama = true;
     try {
-        const messages = [{ role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' }, ...localConversationHistory];
+        while (isLocalActive && pendingUtterances.length > 0) {
+            const batch = pendingUtterances.splice(0, pendingUtterances.length);
+            const combinedEn = batch.map(item => item.en).filter(Boolean).join(' ');
+            const combinedVi = batch.map(item => item.vi).filter(Boolean).join(' ');
+            if (!combinedEn) continue;
+
+            sendToRenderer('update-status', 'Generating response...');
+            try {
+                await sendToLlama(combinedEn, combinedVi);
+            } catch (error) {
+                console.error('[LocalAI] Queued turn error:', error);
+            }
+        }
+    } finally {
+        isGeneratingLlama = false;
+    }
+}
+
+async function sendToLlama(transcription, viHint = '') {
+    const cleanEn = transcription.trim();
+    const cleanVi = String(viHint || '').trim();
+    const promptUserContent = cleanVi ? `Interviewer (EN): ${cleanEn}\n(Vietnamese meaning: ${cleanVi})` : cleanEn;
+
+    try {
+        const priorHistory = localConversationHistory.slice(-6);
+        const messages = [
+            { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
+            ...priorHistory,
+            { role: 'user', content: promptUserContent },
+        ];
 
         let isFirst = true;
         const fullText = await requestLlama(messages, text => {
@@ -273,15 +362,18 @@ async function sendToLlama(transcription) {
         });
 
         if (fullText.trim()) {
-            localConversationHistory.push({
-                role: 'assistant',
-                content: fullText.trim(),
-            });
-            saveConversationTurn(transcription, fullText);
+            localConversationHistory.push({ role: 'user', content: cleanEn });
+            localConversationHistory.push({ role: 'assistant', content: fullText.trim() });
+            if (localConversationHistory.length > 8) {
+                localConversationHistory = localConversationHistory.slice(-8);
+            }
+            saveConversationTurn(cleanEn, fullText);
         }
 
         console.log('[LocalAI] Llama response completed');
-        sendToRenderer('update-status', 'Listening...');
+        if (pendingUtterances.length === 0) {
+            sendToRenderer('update-status', 'Listening...');
+        }
     } catch (error) {
         console.error('[LocalAI] Llama error:', error);
         sendToRenderer('update-status', 'Local AI error: ' + error.message);
@@ -377,7 +469,6 @@ function validatePreparedNativeFiles(nativeFiles) {
         ['Whisper runner', nativeFiles.whisperBinaryPath],
         ['Whisper model', nativeFiles.whisperModelPath],
         ['Language model', nativeFiles.llamaModelPath],
-        ['Vision model', nativeFiles.projectorPath],
     ];
 
     for (const [label, filePath] of requiredFiles) {
@@ -399,14 +490,12 @@ async function startWhisperServer(executablePath, modelPath) {
     await waitForServer(`${whisperBaseUrl}/`, whisperProcess, 120000);
 }
 
-async function startLlamaServer(executablePath, modelPath, projectorPath) {
+async function startLlamaServer(executablePath, modelPath, projectorPath = null, useGpu = true) {
     if (!modelPath || !fs.existsSync(modelPath)) {
         throw new Error(`Language model path is invalid: ${modelPath}`);
     }
-    if (!projectorPath || !fs.existsSync(projectorPath)) {
-        throw new Error(`Vision model path is invalid: ${projectorPath}`);
-    }
 
+    const useProjector = Boolean(projectorPath && fs.existsSync(projectorPath));
     const port = await getAvailablePort();
     const argumentsList = [
         '--host',
@@ -416,14 +505,18 @@ async function startLlamaServer(executablePath, modelPath, projectorPath) {
         '--alias',
         'local',
         '-c',
-        '8192',
+        '4096',
+        '--cache-reuse',
+        '256',
         '-m',
         modelPath,
-        '--mmproj',
-        projectorPath,
     ];
 
-    if (process.platform === 'darwin') {
+    if (useProjector) {
+        argumentsList.push('--mmproj', projectorPath);
+    }
+
+    if (useGpu && (process.platform === 'darwin' || process.platform === 'win32')) {
         argumentsList.push('-ngl', '99');
     }
 
@@ -434,7 +527,40 @@ async function startLlamaServer(executablePath, modelPath, projectorPath) {
         name: 'Llama',
     });
 
-    await waitForServer(`${llamaBaseUrl}/health`, llamaProcess, 30 * 60 * 1000);
+    try {
+        await waitForServer(`${llamaBaseUrl}/health`, llamaProcess, 30 * 60 * 1000);
+        currentLlamaExecutablePath = executablePath;
+        currentLlamaModelPath = modelPath;
+        currentProjectorPath = useProjector ? projectorPath : null;
+        llamaLoadedWithProjector = useProjector;
+    } catch (error) {
+        stopNativeServer(llamaProcess);
+        llamaProcess = null;
+        if (useGpu && process.platform === 'win32') {
+            console.warn('[LocalAI] GPU llama-server startup failed, retrying without -ngl:', error.message);
+            return startLlamaServer(executablePath, modelPath, projectorPath, false);
+        }
+        throw error;
+    }
+}
+
+async function warmupLlamaPrompt() {
+    if (!llamaBaseUrl || parseOllamaModel(llamaModel)) {
+        return;
+    }
+    try {
+        await requestLlama(
+            [
+                { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
+                { role: 'user', content: 'Hi' },
+            ],
+            null,
+            { maxTokens: 1, signal: AbortSignal.timeout(45000) }
+        );
+        console.log('[LocalAI] System prompt KV cache warmed up');
+    } catch (error) {
+        console.warn('[LocalAI] Prompt warmup skipped:', error.message);
+    }
 }
 
 async function ensureCt2WhisperServer(signal) {
@@ -494,6 +620,7 @@ async function initializeLocalSession(model, whisperModel, profile, customPrompt
         closeLocalSession();
         initializationController = new AbortController();
         llamaCacheSnapshot = getDirectoryEntries(path.join(getModelsDirectory(), 'llama'));
+        currentProfile = profile || 'hr_bilingual';
         currentSystemPrompt = getSystemPrompt(profile, customPrompt, false);
         llamaModel = model;
 
@@ -552,7 +679,9 @@ async function initializeLocalSession(model, whisperModel, profile, customPrompt
             );
             sendToRenderer('update-status', 'Loading local language model...');
             sendDownloadProgress('Loading language model');
-            await startLlamaServer(llamaBinaryPath, llamaFiles.modelPath, llamaFiles.projectorPath);
+            await startLlamaServer(llamaBinaryPath, llamaFiles.modelPath, null);
+            sendToRenderer('update-status', 'Warming up CV & JD prompt cache...');
+            await warmupLlamaPrompt();
         } else {
             const nativeFiles = await prepareNativeFiles(model, whisperModel, initializationController.signal);
             validatePreparedNativeFiles(nativeFiles);
@@ -563,13 +692,20 @@ async function initializeLocalSession(model, whisperModel, profile, customPrompt
 
             sendToRenderer('update-status', 'Loading local language model...');
             sendDownloadProgress('Loading language model');
-            await startLlamaServer(nativeFiles.llamaBinaryPath, nativeFiles.llamaModelPath, nativeFiles.projectorPath);
+            await startLlamaServer(nativeFiles.llamaBinaryPath, nativeFiles.llamaModelPath, null);
+            sendToRenderer('update-status', 'Warming up CV & JD prompt cache...');
+            await warmupLlamaPrompt();
         }
 
         isSpeaking = false;
         speechBuffers = [];
+        preRollBuffers = [];
+        speechBytesAccumulated = 0;
         silenceFrameCount = 0;
         speechFrameCount = 0;
+        pendingUtterances = [];
+        isGeneratingLlama = false;
+        activeQueuePromise = null;
         resampleRemainder = Buffer.alloc(0);
         localConversationHistory = [];
 
@@ -619,10 +755,19 @@ function closeLocalSession() {
     llamaBaseUrl = null;
     whisperBaseUrl = null;
     llamaModel = null;
+    currentLlamaExecutablePath = null;
+    currentLlamaModelPath = null;
+    currentProjectorPath = null;
+    llamaLoadedWithProjector = false;
     isSpeaking = false;
     speechBuffers = [];
+    preRollBuffers = [];
+    speechBytesAccumulated = 0;
     silenceFrameCount = 0;
     speechFrameCount = 0;
+    pendingUtterances = [];
+    isGeneratingLlama = false;
+    activeQueuePromise = null;
     resampleRemainder = Buffer.alloc(0);
     localConversationHistory = [];
     currentSystemPrompt = null;
@@ -666,7 +811,7 @@ async function sendLocalText(text) {
                 if (d?.result) sendToRenderer('live-transcript', { en: clean, vi: d.result });
             })
             .catch(() => {});
-        await sendToLlama(clean);
+        await enqueueLlamaTurn(clean, '');
         return { success: true };
     } catch (error) {
         return { success: false, error: error.message };
@@ -676,6 +821,17 @@ async function sendLocalText(text) {
 async function sendLocalImage(base64Data, prompt) {
     if (!isLocalActive || !llamaBaseUrl) {
         return { success: false, error: 'No active local session' };
+    }
+
+    if (!llamaLoadedWithProjector && !parseOllamaModel(llamaModel) && currentLlamaExecutablePath && currentLlamaModelPath) {
+        sendToRenderer('update-status', 'Loading vision projector...');
+        const ensured = await ensureLlamaModel(llamaModel, null, null, undefined, { requireProjector: true });
+        if (ensured.projectorPath) {
+            stopNativeServer(llamaProcess);
+            llamaProcess = null;
+            await startLlamaServer(currentLlamaExecutablePath, currentLlamaModelPath, ensured.projectorPath);
+            await warmupLlamaPrompt();
+        }
     }
 
     const userMessage = {
@@ -691,16 +847,11 @@ async function sendLocalImage(base64Data, prompt) {
         ],
     };
 
-    localConversationHistory.push({ role: 'user', content: prompt });
-    if (localConversationHistory.length > 20) {
-        localConversationHistory = localConversationHistory.slice(-20);
-    }
-
     try {
         sendToRenderer('update-status', 'Analyzing image...');
         const messages = [
             { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
-            ...localConversationHistory.slice(0, -1),
+            ...localConversationHistory.slice(-6),
             userMessage,
         ];
 
@@ -711,7 +862,11 @@ async function sendLocalImage(base64Data, prompt) {
         });
 
         if (fullText.trim()) {
+            localConversationHistory.push({ role: 'user', content: prompt });
             localConversationHistory.push({ role: 'assistant', content: fullText.trim() });
+            if (localConversationHistory.length > 8) {
+                localConversationHistory = localConversationHistory.slice(-8);
+            }
             saveConversationTurn(prompt, fullText);
         }
 

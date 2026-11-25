@@ -171,8 +171,16 @@ class CT2Engine:
             try:
                 translator = ctranslate2.Translator(nllb_dir, device=dev, compute_type=ctype)
                 whisper = WhisperModel(ASR_MODEL_ID, device=dev, compute_type=ctype)
-                # Run one tiny warmup decode on the translator to ensure CUDA kernels/DLLs work
+                # Warm up CUDA/CPU kernels for both translation and Whisper before first live question
                 translator.translate_batch([["eng_Latn", "▁Hello", "</s>"]], target_prefix=[["vie_Latn"]], beam_size=1)
+                warmup_segments, _ = whisper.transcribe(
+                    np.zeros(8000, dtype=np.float32),
+                    language="en",
+                    beam_size=1,
+                    vad_filter=False,
+                    without_timestamps=True,
+                )
+                list(warmup_segments)
                 self.device = dev
                 self.compute_type = ctype
                 self.translator = translator
@@ -199,7 +207,7 @@ class CT2Engine:
             results = self.translator.translate_batch(
                 batch_tokens,
                 target_prefix=prefixes,
-                beam_size=2,
+                beam_size=1,
                 max_decoding_length=256,
             )
 
@@ -237,16 +245,31 @@ class CT2Engine:
         started = time.perf_counter()
         prompt = get_domain_hotwords_prompt()
         audio_input = self._decode_audio_input(wav_bytes)
+        rms = 1.0
+        duration_s = 0.0
+        if isinstance(audio_input, np.ndarray):
+            duration_s = audio_input.size / 16000.0
+            rms = float(np.sqrt(np.mean(np.square(audio_input)))) if audio_input.size else 0.0
+            if rms < 0.002:
+                return {
+                    "text": "",
+                    "vi_text": "",
+                    "device": self.device,
+                    "latency_ms": round((time.perf_counter() - started) * 1000.0, 1),
+                }
         with self._asr_lock:
             segments, _ = self.whisper.transcribe(
                 audio_input,
                 language="en",
-                beam_size=2,
-                vad_filter=True,
+                beam_size=1,
+                vad_filter=False,
+                without_timestamps=True,
                 condition_on_previous_text=False,
                 initial_prompt=prompt,
             )
             en_text = " ".join(seg.text.strip() for seg in segments if seg.text and seg.text.strip()).strip()
+        if duration_s < 1.3 and rms < 0.006 and en_text.lower().strip(" .,!?") in {"you", "thank you", "thanks for watching", "bye"}:
+            en_text = ""
         vi_text = self.translate_en_to_vi(en_text) if en_text else ""
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
         return {

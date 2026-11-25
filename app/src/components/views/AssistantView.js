@@ -758,7 +758,7 @@ export class AssistantView extends LitElement {
                     <input
                         type="text"
                         id="textInput"
-                        placeholder="Type a message..."
+                        placeholder="Type an English HR question to test (e.g. Tell me about yourself) or play audio..."
                         @keydown=${this.handleTextKeydown}
                     />
                 </div>
