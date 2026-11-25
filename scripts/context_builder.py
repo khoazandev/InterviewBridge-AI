@@ -395,6 +395,9 @@ def main() -> int:
 
     prefs = sync_to_app_config(updates, config_dir=args.config_dir, preview_path=preview_path)
     target_dir = args.config_dir or get_default_config_dir()
+    playbook_src = user_data_dir / "playbook.json"
+    if playbook_src.exists():
+        shutil.copy2(playbook_src, target_dir / "playbook.json")
     print(
         f"[context_builder] Synced to {target_dir / 'preferences.json'} "
         f"(profile={prefs.get('selectedProfile')}, cv={len(prefs.get('cvText', ''))} chars, "

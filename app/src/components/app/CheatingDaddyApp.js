@@ -379,6 +379,7 @@ export class CheatingDaddyApp extends LitElement {
         currentResponseIndex: { type: Number },
         liveTranscript: { type: String },
         liveTranslation: { type: String },
+        responsePinned: { type: Boolean },
         selectedScreenshotInterval: { type: String },
         selectedImageQuality: { type: String },
         layoutMode: { type: String },
@@ -408,6 +409,7 @@ export class CheatingDaddyApp extends LitElement {
         this.currentResponseIndex = -1;
         this.liveTranscript = '';
         this.liveTranslation = '';
+        this.responsePinned = false;
         this._viewInstances = new Map();
         this._isClickThrough = false;
         this._awaitingNewResponse = false;
@@ -538,7 +540,7 @@ export class CheatingDaddyApp extends LitElement {
     addNewResponse(response) {
         const wasOnLatest = this.currentResponseIndex === this.responses.length - 1;
         this.responses = [...this.responses, response];
-        if (wasOnLatest || this.currentResponseIndex === -1) {
+        if (this.currentResponseIndex === -1 || (!this.responsePinned && wasOnLatest)) {
             this.currentResponseIndex = this.responses.length - 1;
         }
         this._awaitingNewResponse = false;
@@ -644,6 +646,7 @@ export class CheatingDaddyApp extends LitElement {
         this.currentResponseIndex = -1;
         this.liveTranscript = '';
         this.liveTranslation = '';
+        this.responsePinned = false;
         this.startTime = Date.now();
         this.sessionActive = true;
         this.currentView = 'assistant';
@@ -801,9 +804,14 @@ export class CheatingDaddyApp extends LitElement {
                         .currentResponseIndex=${this.currentResponseIndex}
                         .liveTranscript=${this.liveTranscript}
                         .liveTranslation=${this.liveTranslation}
+                        .responsePinned=${this.responsePinned}
                         .selectedProfile=${this.selectedProfile}
                         .onSendText=${msg => this.handleSendText(msg)}
                         .shouldAnimateResponse=${this.shouldAnimateResponse}
+                        @toggle-pin-response=${() => {
+                            this.responsePinned = !this.responsePinned;
+                            this.requestUpdate();
+                        }}
                         @response-index-changed=${this.handleResponseIndexChanged}
                         @response-animation-complete=${() => {
                             this.shouldAnimateResponse = false;

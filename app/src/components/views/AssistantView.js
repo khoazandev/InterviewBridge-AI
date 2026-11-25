@@ -252,6 +252,29 @@ export class AssistantView extends LitElement {
             text-align: center;
         }
 
+        .pin-btn {
+            margin-left: auto;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: var(--font-size-xs);
+            padding: 3px 10px;
+            border-radius: 999px;
+            transition: border-color var(--transition), color var(--transition), background var(--transition);
+        }
+
+        .pin-btn:hover {
+            border-color: var(--accent);
+            color: var(--text-primary);
+        }
+
+        .pin-btn.pinned {
+            border-color: var(--accent);
+            color: var(--text-primary);
+            background: rgba(59, 130, 246, 0.18);
+        }
+
         /* ── Bottom input bar ── */
 
         .input-bar {
@@ -351,6 +374,7 @@ export class AssistantView extends LitElement {
         currentResponseIndex: { type: Number },
         liveTranscript: { type: String },
         liveTranslation: { type: String },
+        responsePinned: { type: Boolean },
         selectedProfile: { type: String },
         onSendText: { type: Function },
         shouldAnimateResponse: { type: Boolean },
@@ -363,6 +387,7 @@ export class AssistantView extends LitElement {
         this.currentResponseIndex = -1;
         this.liveTranscript = '';
         this.liveTranslation = '';
+        this.responsePinned = false;
         this.selectedProfile = 'hr_bilingual';
         this.onSendText = () => {};
         this.isAnalyzing = false;
@@ -458,6 +483,10 @@ export class AssistantView extends LitElement {
             );
             this.requestUpdate();
         }
+    }
+
+    togglePinResponse() {
+        this.dispatchEvent(new CustomEvent('toggle-pin-response', { bubbles: true, composed: true }));
     }
 
     scrollResponseUp() {
@@ -717,7 +746,7 @@ export class AssistantView extends LitElement {
     }
 
     render() {
-        const hasMultipleResponses = this.responses.length > 1;
+        const hasResponses = this.responses.length >= 1;
 
         return html`
             <div class="live-transcript-bar">
@@ -737,7 +766,7 @@ export class AssistantView extends LitElement {
 
             <div class="response-container" id="responseContainer"></div>
 
-            ${hasMultipleResponses ? html`
+            ${hasResponses ? html`
                 <div class="response-nav">
                     <button class="nav-btn" @click=${this.navigateToPreviousResponse} ?disabled=${this.currentResponseIndex <= 0} title="Previous response">
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
@@ -749,6 +778,13 @@ export class AssistantView extends LitElement {
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                             <path fill-rule="evenodd" d="M8.22 5.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L11.94 10 8.22 6.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
                         </svg>
+                    </button>
+                    <button
+                        class="pin-btn ${this.responsePinned ? 'pinned' : ''}"
+                        @click=${this.togglePinResponse}
+                        title="Giữ nguyên gợi ý đang đọc khi HR nói tiếp"
+                    >
+                        ${this.responsePinned ? '📌 Đang ghim' : '📌 Ghim gợi ý'}
                     </button>
                 </div>
             ` : ''}

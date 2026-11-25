@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const { app } = require('electron');
 const { getSystemPrompt } = require('./prompts');
 const { sendToRenderer, initializeNewSession, saveConversationTurn } = require('./gemini');
+const { matchPlaybookAnswer } = require('./playbook');
 const {
     ensureNativeBinary,
     ensureLlamaModel,
@@ -35,6 +36,8 @@ let isSpeaking = false;
 let speechBuffers = [];
 let preRollBuffers = [];
 let speechBytesAccumulated = 0;
+let lastPreviewBytes = 0;
+let isPreviewInFlight = false;
 let silenceFrameCount = 0;
 let speechFrameCount = 0;
 let pendingUtterances = [];
@@ -42,10 +45,10 @@ let isGeneratingLlama = false;
 let activeQueuePromise = null;
 
 const VAD_MODES = {
-    NORMAL: { energyThreshold: 0.007, speechFramesRequired: 2, silenceFramesRequired: 6, softFlushBytes: 176000, hardFlushBytes: 288000 },
-    LOW_BITRATE: { energyThreshold: 0.006, speechFramesRequired: 3, silenceFramesRequired: 10, softFlushBytes: 176000, hardFlushBytes: 288000 },
-    AGGRESSIVE: { energyThreshold: 0.01, speechFramesRequired: 2, silenceFramesRequired: 6, softFlushBytes: 176000, hardFlushBytes: 288000 },
-    VERY_AGGRESSIVE: { energyThreshold: 0.007, speechFramesRequired: 2, silenceFramesRequired: 6, softFlushBytes: 176000, hardFlushBytes: 288000 },
+    NORMAL: { energyThreshold: 0.007, speechFramesRequired: 2, silenceFramesRequired: 9, softFlushBytes: 224000, hardFlushBytes: 352000 },
+    LOW_BITRATE: { energyThreshold: 0.006, speechFramesRequired: 3, silenceFramesRequired: 12, softFlushBytes: 224000, hardFlushBytes: 352000 },
+    AGGRESSIVE: { energyThreshold: 0.01, speechFramesRequired: 2, silenceFramesRequired: 9, softFlushBytes: 224000, hardFlushBytes: 352000 },
+    VERY_AGGRESSIVE: { energyThreshold: 0.007, speechFramesRequired: 2, silenceFramesRequired: 9, softFlushBytes: 224000, hardFlushBytes: 352000 },
 };
 
 let vadConfig = VAD_MODES.NORMAL;
@@ -105,6 +108,7 @@ function flushSpeechSegment(keepSpeaking = false) {
     const audioData = Buffer.concat(speechBuffers);
     speechBuffers = [];
     speechBytesAccumulated = 0;
+    lastPreviewBytes = 0;
     silenceFrameCount = 0;
     isSpeaking = keepSpeaking;
     if (!keepSpeaking) {
@@ -113,6 +117,29 @@ function flushSpeechSegment(keepSpeaking = false) {
     console.log('[LocalAI] Flushing speech segment:', audioData.length, 'bytes, keepSpeaking:', keepSpeaking);
     sendToRenderer('update-status', 'Transcribing...');
     handleSpeechEnd(audioData);
+}
+
+function triggerLivePreview() {
+    if (isPreviewInFlight || !isLocalActive || !isSpeaking || !whisperBaseUrl) return;
+    const snapshot = Buffer.concat(speechBuffers);
+    const windowSlice = snapshot.length > 256000 ? snapshot.slice(snapshot.length - 256000) : snapshot;
+    if (windowSlice.length < 16000) return;
+
+    isPreviewInFlight = true;
+    lastPreviewBytes = speechBytesAccumulated;
+    transcribeAudio(windowSlice)
+        .then(({ text, viText }) => {
+            if (isLocalActive && isSpeaking && text && text.length >= 2) {
+                sendToRenderer('live-transcript', {
+                    en: `${text} …`,
+                    vi: viText ? `${viText} …` : '',
+                });
+            }
+        })
+        .catch(() => {})
+        .finally(() => {
+            isPreviewInFlight = false;
+        });
 }
 
 function processVad(pcm16kBuffer) {
@@ -136,6 +163,7 @@ function processVad(pcm16kBuffer) {
             speechBuffers = [...preRollBuffers];
             preRollBuffers = [];
             speechBytesAccumulated = speechBuffers.reduce((sum, buf) => sum + buf.length, 0);
+            lastPreviewBytes = 0;
             console.log('[LocalAI] Speech started (RMS:', rms.toFixed(4), ')');
             sendToRenderer('update-status', 'Listening... (speech detected)');
         }
@@ -146,7 +174,7 @@ function processVad(pcm16kBuffer) {
         if (
             isSpeaking &&
             (silenceFrameCount >= vadConfig.silenceFramesRequired ||
-                (silenceFrameCount >= 2 && speechBytesAccumulated >= vadConfig.softFlushBytes))
+                (silenceFrameCount >= 3 && speechBytesAccumulated >= vadConfig.softFlushBytes))
         ) {
             flushSpeechSegment(false);
             return;
@@ -158,6 +186,10 @@ function processVad(pcm16kBuffer) {
         speechBytesAccumulated += chunkCopy.length;
         if (speechBytesAccumulated >= vadConfig.hardFlushBytes) {
             flushSpeechSegment(true);
+            return;
+        }
+        if (!isPreviewInFlight && speechBytesAccumulated >= 56000 && speechBytesAccumulated - lastPreviewBytes >= 56000) {
+            triggerLivePreview();
         }
     }
 }
@@ -211,6 +243,21 @@ async function transcribeAudio(pcm16kBuffer) {
     return { text, viText };
 }
 
+function isNonQuestionFiller(text) {
+    if (localConversationHistory.length === 0) return false;
+    const clean = String(text || '').trim();
+    if (!clean || clean.includes('?')) return false;
+    const wordCount = clean.split(/\s+/).length;
+    if (wordCount > 10) return false;
+    const hasQuestionOrTopicKeyword = /\b(what|why|how|when|where|who|which|can|could|would|will|do|does|did|have|has|are|is|tell|walk|describe|explain|share|introduce|experience|project|strength|weakness|salary|graduate|available|question|ielts|moderation|tiktok)\b/i.test(
+        clean
+    );
+    if (hasQuestionOrTopicKeyword) return false;
+    return /^(okay|ok|alright|sure|great|awesome|perfect|thank you|thanks|no problem|got it|sounds good|take your time|go ahead|whenever you|let's get into it|please go ahead|keep this|keep it)\b/i.test(
+        clean
+    );
+}
+
 async function handleSpeechEnd(audioData) {
     if (!isLocalActive) return;
 
@@ -235,6 +282,13 @@ async function handleSpeechEnd(audioData) {
         }
 
         sendToRenderer('live-transcript', { en: transcription, vi: viText });
+        if (isNonQuestionFiller(transcription)) {
+            console.log('[LocalAI] Filler remark detected, keeping active suggestion card:', transcription);
+            if (!isGeneratingLlama) {
+                sendToRenderer('update-status', 'Listening...');
+            }
+            return;
+        }
         enqueueLlamaTurn(transcription, viText);
     } catch (error) {
         console.error('[LocalAI] Transcription error:', error);
@@ -284,7 +338,7 @@ async function requestLlama(messages, onText, options = {}) {
         messages,
         stream: true,
         temperature: 0.2,
-        max_tokens: options.maxTokens || 320,
+        max_tokens: options.maxTokens || 450,
     };
     if (!ollamaTag) {
         payload.cache_prompt = true;
@@ -345,6 +399,25 @@ async function drainLlamaQueue() {
 async function sendToLlama(transcription, viHint = '') {
     const cleanEn = transcription.trim();
     const cleanVi = String(viHint || '').trim();
+
+    if (currentProfile === 'hr_bilingual') {
+        const playbookMarkdown = matchPlaybookAnswer(cleanEn, cleanVi);
+        if (playbookMarkdown) {
+            sendToRenderer('new-response', playbookMarkdown);
+            localConversationHistory.push({ role: 'user', content: cleanEn });
+            localConversationHistory.push({ role: 'assistant', content: playbookMarkdown });
+            if (localConversationHistory.length > 8) {
+                localConversationHistory = localConversationHistory.slice(-8);
+            }
+            saveConversationTurn(cleanEn, playbookMarkdown);
+            console.log('[LocalAI] Served 0ms Playbook match');
+            if (pendingUtterances.length === 0) {
+                sendToRenderer('update-status', 'Listening...');
+            }
+            return;
+        }
+    }
+
     const promptUserContent = cleanVi ? `Interviewer (EN): ${cleanEn}\n(Vietnamese meaning: ${cleanVi})` : cleanEn;
 
     try {
@@ -701,6 +774,8 @@ async function initializeLocalSession(model, whisperModel, profile, customPrompt
         speechBuffers = [];
         preRollBuffers = [];
         speechBytesAccumulated = 0;
+        lastPreviewBytes = 0;
+        isPreviewInFlight = false;
         silenceFrameCount = 0;
         speechFrameCount = 0;
         pendingUtterances = [];
@@ -763,6 +838,8 @@ function closeLocalSession() {
     speechBuffers = [];
     preRollBuffers = [];
     speechBytesAccumulated = 0;
+    lastPreviewBytes = 0;
+    isPreviewInFlight = false;
     silenceFrameCount = 0;
     speechFrameCount = 0;
     pendingUtterances = [];

@@ -6,6 +6,7 @@ const { getSystemPrompt } = require('./prompts');
 const { getAvailableModel, incrementLimitCount, getApiKey, getGroqApiKey, incrementCharUsage, getConfig } = require('../storage');
 const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud, isCloudActive, setOnTurnComplete } = require('./cloud');
 const { startTransportLog, logTransportEvent, closeTransportLog } = require('./transportLogger');
+const { matchPlaybookAnswer } = require('./playbook');
 
 // Lazy-loaded to avoid circular dependency (localai.js imports from gemini.js)
 let _localai = null;
@@ -311,6 +312,25 @@ function getGroqReasoningOptions(model, disableThinking) {
     return {};
 }
 
+function tryServePlaybookTurn(transcription) {
+    const activeProfile = sessionParams?.profile || currentProfile || 'hr_bilingual';
+    if (activeProfile !== 'hr_bilingual') return false;
+
+    const playbookAnswer = matchPlaybookAnswer(String(transcription || '').trim());
+    if (!playbookAnswer) return false;
+
+    const cleanEn = transcription.trim();
+    groqConversationHistory.push({ role: 'user', content: cleanEn });
+    groqConversationHistory.push({ role: 'assistant', content: playbookAnswer });
+    if (groqConversationHistory.length > 20) {
+        groqConversationHistory = groqConversationHistory.slice(-20);
+    }
+    sendToRenderer('new-response', playbookAnswer);
+    saveConversationTurn(cleanEn, playbookAnswer);
+    sendToRenderer('update-status', 'Listening...');
+    return true;
+}
+
 async function sendToGroq(transcription) {
     const groqApiKey = getGroqApiKey();
     if (!groqApiKey) {
@@ -320,6 +340,11 @@ async function sendToGroq(transcription) {
 
     if (!transcription || transcription.trim() === '') {
         console.log('Empty transcription, skipping Groq');
+        return;
+    }
+
+    if (tryServePlaybookTurn(transcription)) {
+        console.log('Served 0ms Playbook match (Groq path)');
         return;
     }
 
@@ -673,6 +698,11 @@ async function sendToGeminiText(transcription) {
     }
 
     if (!transcription || transcription.trim() === '') {
+        return;
+    }
+
+    if (tryServePlaybookTurn(transcription)) {
+        console.log('Served 0ms Playbook match (Gemini path)');
         return;
     }
 
