@@ -13,6 +13,39 @@ export class AssistantView extends LitElement {
             cursor: default;
         }
 
+        /* ── Live transcript bar ── */
+
+        .live-transcript-bar {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--border);
+            padding: 8px 14px;
+            font-size: var(--font-size-sm);
+            line-height: 1.4;
+            user-select: text;
+        }
+
+        .live-transcript-label {
+            color: var(--accent);
+            font-weight: var(--font-weight-semibold);
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .live-transcript-text {
+            color: var(--text-primary);
+            user-select: text;
+            cursor: text;
+            word-break: break-word;
+        }
+
+        .live-transcript-text.empty {
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
         /* ── Response area ── */
 
         .response-container {
@@ -303,6 +336,7 @@ export class AssistantView extends LitElement {
     static properties = {
         responses: { type: Array },
         currentResponseIndex: { type: Number },
+        liveTranscript: { type: String },
         selectedProfile: { type: String },
         onSendText: { type: Function },
         shouldAnimateResponse: { type: Boolean },
@@ -313,6 +347,7 @@ export class AssistantView extends LitElement {
         super();
         this.responses = [];
         this.currentResponseIndex = -1;
+        this.liveTranscript = '';
         this.selectedProfile = 'hr_bilingual';
         this.onSendText = () => {};
         this.isAnalyzing = false;
@@ -670,6 +705,13 @@ export class AssistantView extends LitElement {
         const hasMultipleResponses = this.responses.length > 1;
 
         return html`
+            <div class="live-transcript-bar">
+                <span class="live-transcript-label">🎧 HR (EN):</span>
+                <span class="live-transcript-text ${this.liveTranscript ? '' : 'empty'}">
+                    ${this.liveTranscript || 'Waiting for interviewer speech...'}
+                </span>
+            </div>
+
             <div class="response-container" id="responseContainer"></div>
 
             ${hasMultipleResponses ? html`

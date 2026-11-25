@@ -377,6 +377,7 @@ export class CheatingDaddyApp extends LitElement {
         selectedLanguage: { type: String },
         responses: { type: Array },
         currentResponseIndex: { type: Number },
+        liveTranscript: { type: String },
         selectedScreenshotInterval: { type: String },
         selectedImageQuality: { type: String },
         layoutMode: { type: String },
@@ -404,6 +405,7 @@ export class CheatingDaddyApp extends LitElement {
         this.layoutMode = 'normal';
         this.responses = [];
         this.currentResponseIndex = -1;
+        this.liveTranscript = '';
         this._viewInstances = new Map();
         this._isClickThrough = false;
         this._awaitingNewResponse = false;
@@ -456,6 +458,10 @@ export class CheatingDaddyApp extends LitElement {
             const { ipcRenderer } = window.require('electron');
             ipcRenderer.on('new-response', (_, response) => this.addNewResponse(response));
             ipcRenderer.on('update-response', (_, response) => this.updateCurrentResponse(response));
+            ipcRenderer.on('live-transcript', (_, text) => {
+                this.liveTranscript = text;
+                this.requestUpdate();
+            });
             ipcRenderer.on('update-status', (_, status) => this.setStatus(status));
             ipcRenderer.on('click-through-toggled', (_, isEnabled) => {
                 this._isClickThrough = isEnabled;
@@ -477,6 +483,7 @@ export class CheatingDaddyApp extends LitElement {
             const { ipcRenderer } = window.require('electron');
             ipcRenderer.removeAllListeners('new-response');
             ipcRenderer.removeAllListeners('update-response');
+            ipcRenderer.removeAllListeners('live-transcript');
             ipcRenderer.removeAllListeners('update-status');
             ipcRenderer.removeAllListeners('click-through-toggled');
             ipcRenderer.removeAllListeners('reconnect-failed');
@@ -628,6 +635,7 @@ export class CheatingDaddyApp extends LitElement {
         cheatingDaddy.startCapture(this.selectedScreenshotInterval, this.selectedImageQuality);
         this.responses = [];
         this.currentResponseIndex = -1;
+        this.liveTranscript = '';
         this.startTime = Date.now();
         this.sessionActive = true;
         this.currentView = 'assistant';
@@ -783,6 +791,7 @@ export class CheatingDaddyApp extends LitElement {
                     <assistant-view
                         .responses=${this.responses}
                         .currentResponseIndex=${this.currentResponseIndex}
+                        .liveTranscript=${this.liveTranscript}
                         .selectedProfile=${this.selectedProfile}
                         .onSendText=${msg => this.handleSendText(msg)}
                         .shouldAnimateResponse=${this.shouldAnimateResponse}

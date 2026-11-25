@@ -175,6 +175,7 @@ async function handleSpeechEnd(audioData) {
             return;
         }
 
+        sendToRenderer('live-transcript', transcription.trim());
         sendToRenderer('update-status', 'Generating response...');
         await sendToLlama(transcription);
     } catch (error) {
