@@ -378,6 +378,7 @@ export class CheatingDaddyApp extends LitElement {
         responses: { type: Array },
         currentResponseIndex: { type: Number },
         liveTranscript: { type: String },
+        liveTranslation: { type: String },
         selectedScreenshotInterval: { type: String },
         selectedImageQuality: { type: String },
         layoutMode: { type: String },
@@ -406,6 +407,7 @@ export class CheatingDaddyApp extends LitElement {
         this.responses = [];
         this.currentResponseIndex = -1;
         this.liveTranscript = '';
+        this.liveTranslation = '';
         this._viewInstances = new Map();
         this._isClickThrough = false;
         this._awaitingNewResponse = false;
@@ -458,8 +460,13 @@ export class CheatingDaddyApp extends LitElement {
             const { ipcRenderer } = window.require('electron');
             ipcRenderer.on('new-response', (_, response) => this.addNewResponse(response));
             ipcRenderer.on('update-response', (_, response) => this.updateCurrentResponse(response));
-            ipcRenderer.on('live-transcript', (_, text) => {
-                this.liveTranscript = text;
+            ipcRenderer.on('live-transcript', (_, payload) => {
+                if (typeof payload === 'string') {
+                    this.liveTranscript = payload;
+                } else if (payload && typeof payload === 'object') {
+                    if (payload.en !== undefined) this.liveTranscript = payload.en;
+                    if (payload.vi !== undefined) this.liveTranslation = payload.vi;
+                }
                 this.requestUpdate();
             });
             ipcRenderer.on('update-status', (_, status) => this.setStatus(status));
@@ -636,6 +643,7 @@ export class CheatingDaddyApp extends LitElement {
         this.responses = [];
         this.currentResponseIndex = -1;
         this.liveTranscript = '';
+        this.liveTranslation = '';
         this.startTime = Date.now();
         this.sessionActive = true;
         this.currentView = 'assistant';
@@ -792,6 +800,7 @@ export class CheatingDaddyApp extends LitElement {
                         .responses=${this.responses}
                         .currentResponseIndex=${this.currentResponseIndex}
                         .liveTranscript=${this.liveTranscript}
+                        .liveTranslation=${this.liveTranslation}
                         .selectedProfile=${this.selectedProfile}
                         .onSendText=${msg => this.handleSendText(msg)}
                         .shouldAnimateResponse=${this.shouldAnimateResponse}

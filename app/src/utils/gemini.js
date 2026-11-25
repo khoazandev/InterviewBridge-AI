@@ -48,11 +48,37 @@ let systemAudioProc = null;
 let messageBuffer = '';
 let groqRequestStartedForTurn = false;
 let transcriptionDebounceTimer = null;
+let ct2TranslateDebounceTimer = null;
 
 function clearTranscriptionDebounce() {
     if (transcriptionDebounceTimer) {
         clearTimeout(transcriptionDebounceTimer);
         transcriptionDebounceTimer = null;
+    }
+    if (ct2TranslateDebounceTimer) {
+        clearTimeout(ct2TranslateDebounceTimer);
+        ct2TranslateDebounceTimer = null;
+    }
+}
+
+async function translateFastViaCt2(enText) {
+    const clean = String(enText || '').trim();
+    if (!clean) return;
+    try {
+        const res = await fetch('http://127.0.0.1:8989/translate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: clean, from: 'en', to: 'vi' }),
+            signal: AbortSignal.timeout(1500),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const vi = String(data.result || data.translatedText || '').trim();
+        if (vi) {
+            sendToRenderer('live-transcript', { en: clean, vi });
+        }
+    } catch {
+        // CT2 micro-engine is optional; ignore if offline
     }
 }
 
@@ -228,7 +254,8 @@ function flushTurnTranscription() {
         return;
     }
 
-    sendToRenderer('live-transcript', transcription);
+    sendToRenderer('live-transcript', { en: transcription });
+    translateFastViaCt2(transcription);
     sendToRenderer('update-status', 'Translating & suggesting...');
     if (hasGroqKey()) {
         sendToGroq(transcription);
@@ -773,9 +800,11 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     if (message.serverContent?.inputTranscription) {
                         const liveText = currentTranscription.trim();
                         if (liveText) {
-                            sendToRenderer('live-transcript', liveText);
+                            sendToRenderer('live-transcript', { en: liveText });
+                            if (ct2TranslateDebounceTimer) clearTimeout(ct2TranslateDebounceTimer);
+                            ct2TranslateDebounceTimer = setTimeout(() => translateFastViaCt2(liveText), 250);
                         }
-                        clearTranscriptionDebounce();
+                        if (transcriptionDebounceTimer) clearTimeout(transcriptionDebounceTimer);
                         transcriptionDebounceTimer = setTimeout(flushTurnTranscription, 950);
                     }
 
@@ -1317,7 +1346,8 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         try {
             console.log('Sending text message:', text);
             const cleanText = text.trim();
-            sendToRenderer('live-transcript', cleanText);
+            sendToRenderer('live-transcript', { en: cleanText });
+            translateFastViaCt2(cleanText);
 
             if (hasGroqKey()) {
                 groqRequestStartedForTurn = true;

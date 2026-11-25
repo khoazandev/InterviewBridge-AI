@@ -1,5 +1,7 @@
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
+const { app } = require('electron');
 const { getSystemPrompt } = require('./prompts');
 const { sendToRenderer, initializeNewSession, saveConversationTurn } = require('./gemini');
 const {
@@ -160,8 +162,9 @@ async function transcribeAudio(pcm16kBuffer) {
 
     const result = await response.json();
     const text = result.text?.trim() || '';
+    const viText = result.vi_text?.trim() || '';
     console.log('[LocalAI] Transcription:', text);
-    return text;
+    return { text, viText };
 }
 
 async function handleSpeechEnd(audioData) {
@@ -174,7 +177,7 @@ async function handleSpeechEnd(audioData) {
     }
 
     try {
-        const transcription = await transcribeAudio(audioData);
+        const { text: transcription, viText } = await transcribeAudio(audioData);
 
         if (!transcription || transcription.length < 2) {
             console.log('[LocalAI] Empty transcription, skipping');
@@ -182,7 +185,7 @@ async function handleSpeechEnd(audioData) {
             return;
         }
 
-        sendToRenderer('live-transcript', transcription.trim());
+        sendToRenderer('live-transcript', { en: transcription, vi: viText });
         sendToRenderer('update-status', 'Generating response...');
         await sendToLlama(transcription);
     } catch (error) {
@@ -434,6 +437,55 @@ async function startLlamaServer(executablePath, modelPath, projectorPath) {
     await waitForServer(`${llamaBaseUrl}/health`, llamaProcess, 30 * 60 * 1000);
 }
 
+async function ensureCt2WhisperServer(signal) {
+    const defaultUrl = 'http://127.0.0.1:8989';
+    try {
+        const ping = await fetch(`${defaultUrl}/health`, { signal: AbortSignal.timeout(1200) });
+        if (ping.ok) {
+            whisperBaseUrl = defaultUrl;
+            whisperProcess = null;
+            console.log('[LocalAI] Connected to running CTranslate2 engine at', defaultUrl);
+            return true;
+        }
+    } catch {
+        // Not running yet; try auto-starting scripts/ct2_engine.py
+    }
+
+    const ct2ScriptPath = app?.isPackaged
+        ? path.join(process.resourcesPath, 'ct2_engine.py')
+        : path.resolve(__dirname, '../../scripts/ct2_engine.py');
+    if (!fs.existsSync(ct2ScriptPath)) {
+        return false;
+    }
+
+    const port = await getAvailablePort();
+    for (const pyCmd of ['python', 'py']) {
+        try {
+            const proc = spawn(pyCmd, [ct2ScriptPath, '--port', String(port)], {
+                env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+                stdio: ['ignore', 'pipe', 'pipe'],
+                windowsHide: true,
+            });
+            proc.stdout.on('data', d => process.stdout.write(`[CT2] ${d}`));
+            proc.stderr.on('data', d => process.stderr.write(`[CT2] ${d}`));
+            const candidateUrl = `http://127.0.0.1:${port}`;
+            await waitForServer(`${candidateUrl}/health`, proc, 180000);
+            if (signal?.aborted) {
+                stopNativeServer(proc);
+                throw new DOMException('Aborted', 'AbortError');
+            }
+            whisperProcess = proc;
+            whisperBaseUrl = candidateUrl;
+            console.log('[LocalAI] Started CTranslate2 engine at', candidateUrl);
+            return true;
+        } catch (err) {
+            if (err.name === 'AbortError') throw err;
+            console.warn(`[LocalAI] CT2 engine via '${pyCmd}' unavailable (${err.message}), falling back if needed.`);
+        }
+    }
+    return false;
+}
+
 async function initializeLocalSession(model, whisperModel, profile, customPrompt) {
     console.log('[LocalAI] Initializing native local session:', { model, whisperModel, profile });
     sendToRenderer('session-initializing', true);
@@ -444,6 +496,10 @@ async function initializeLocalSession(model, whisperModel, profile, customPrompt
         llamaCacheSnapshot = getDirectoryEntries(path.join(getModelsDirectory(), 'llama'));
         currentSystemPrompt = getSystemPrompt(profile, customPrompt, false);
         llamaModel = model;
+
+        sendToRenderer('update-status', 'Starting speech & translation engine...');
+        sendDownloadProgress('Checking CTranslate2 engine');
+        const ct2Ready = await ensureCt2WhisperServer(initializationController.signal);
 
         const ollamaTag = parseOllamaModel(model);
         if (ollamaTag) {
@@ -458,26 +514,45 @@ async function initializeLocalSession(model, whisperModel, profile, customPrompt
                 );
             }
 
+            if (!ct2Ready) {
+                const progressCb = label => progress => {
+                    sendToRenderer('update-status', formatDownloadStatus(label, progress));
+                    sendDownloadProgress(label, progress);
+                };
+                sendDownloadProgress('Checking Whisper runner');
+                const whisperBinaryPath = await ensureNativeBinary('whisper', progressCb('Whisper runner'), initializationController.signal);
+
+                let whisperModelPath;
+                sendToRenderer('whisper-downloading', true);
+                try {
+                    sendDownloadProgress('Checking Whisper model');
+                    whisperModelPath = await ensureWhisperModel(whisperModel, progressCb('Whisper model'), initializationController.signal);
+                } finally {
+                    sendToRenderer('whisper-downloading', false);
+                }
+
+                sendToRenderer('update-status', 'Starting Whisper...');
+                sendDownloadProgress('Starting Whisper');
+                await startWhisperServer(whisperBinaryPath, whisperModelPath);
+            }
+            llamaBaseUrl = ollamaHost;
+        } else if (ct2Ready) {
             const progressCb = label => progress => {
                 sendToRenderer('update-status', formatDownloadStatus(label, progress));
                 sendDownloadProgress(label, progress);
             };
-            sendDownloadProgress('Checking Whisper runner');
-            const whisperBinaryPath = await ensureNativeBinary('whisper', progressCb('Whisper runner'), initializationController.signal);
-
-            let whisperModelPath;
-            sendToRenderer('whisper-downloading', true);
-            try {
-                sendDownloadProgress('Checking Whisper model');
-                whisperModelPath = await ensureWhisperModel(whisperModel, progressCb('Whisper model'), initializationController.signal);
-            } finally {
-                sendToRenderer('whisper-downloading', false);
-            }
-
-            sendToRenderer('update-status', 'Starting Whisper...');
-            sendDownloadProgress('Starting Whisper');
-            await startWhisperServer(whisperBinaryPath, whisperModelPath);
-            llamaBaseUrl = ollamaHost;
+            sendDownloadProgress('Checking Llama runner');
+            const llamaBinaryPath = await ensureNativeBinary('llama', progressCb('Llama runner'), initializationController.signal);
+            sendDownloadProgress('Checking language model');
+            const llamaFiles = await ensureLlamaModel(
+                model,
+                progressCb('Language model'),
+                progressCb('Vision model'),
+                initializationController.signal
+            );
+            sendToRenderer('update-status', 'Loading local language model...');
+            sendDownloadProgress('Loading language model');
+            await startLlamaServer(llamaBinaryPath, llamaFiles.modelPath, llamaFiles.projectorPath);
         } else {
             const nativeFiles = await prepareNativeFiles(model, whisperModel, initializationController.signal);
             validatePreparedNativeFiles(nativeFiles);
@@ -578,8 +653,20 @@ async function sendLocalText(text) {
     }
 
     try {
-        sendToRenderer('live-transcript', text.trim());
-        await sendToLlama(text);
+        const clean = text.trim();
+        sendToRenderer('live-transcript', { en: clean });
+        fetch('http://127.0.0.1:8989/translate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: clean, from: 'en', to: 'vi' }),
+            signal: AbortSignal.timeout(1500),
+        })
+            .then(r => (r.ok ? r.json() : null))
+            .then(d => {
+                if (d?.result) sendToRenderer('live-transcript', { en: clean, vi: d.result });
+            })
+            .catch(() => {});
+        await sendToLlama(clean);
         return { success: true };
     } catch (error) {
         return { success: false, error: error.message };

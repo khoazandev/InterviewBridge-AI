@@ -1,0 +1,10 @@
+ctranslate2>=4.5.0
+faster-whisper>=1.1.0
+av>=11,<17
+sentencepiece>=0.2.0
+huggingface_hub>=0.25.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+python-multipart>=0.0.9
+nvidia-cublas-cu12; platform_system == "Windows"
+nvidia-cudnn-cu12; platform_system == "Windows"

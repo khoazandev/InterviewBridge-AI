@@ -3,8 +3,8 @@
 **Real-time Bilingual (`EN → VI`) AI Interview Copilot, CLI & Agent Skill grounded in your CV + JD (Windows 11 Ready).**
 
 Trợ lý phỏng vấn tiếng Anh thời gian thực mã nguồn mở cho ứng viên Việt Nam:
-- **Nghe & Dịch phụ đề 0ms:** Kết hợp Windows 11 Live Captions (`LiveCaptions-Translator`) để hiển thị phụ đề song ngữ Anh–Việt tức thì ngay dưới webcam.
-- **Gợi ý trả lời chuẩn theo CV + JD:** Nạp trực tiếp **CV** (`.pdf`, `.docx`, `.txt`, `.md`) + **Job Description (JD)** + thông tin HR (lương kỳ vọng, notice period, lý do chuyển việc) để AI gợi ý **3 gạch đầu dòng tiếng Anh B1–B2 tự nhiên, dễ nói**, không bịa đặt kinh nghiệm.
+- **Nghe & Dịch GPU `CTranslate2` siêu tốc (`faster-whisper` CUDA + `NLLB-200`):** Bắt chữ tiếng Anh có nạp sẵn từ khóa CV/JD (`initial_prompt`) và dịch thành ngữ phỏng vấn sang tiếng Việt **100% offline trên GPU NVIDIA** (`http://127.0.0.1:8989`), hiển thị thanh song ngữ **`🎧 HR (EN)` + `⚡ Dịch tức thì (CT2)`** ngay trong app và `LiveCaptions-Translator`.
+- **Gợi ý trả lời chuẩn theo CV + JD:** Nạp trực tiếp **CV** (`.pdf`, `.docx`, `.txt`, `.md`) + **Job Description (JD)** + thông tin HR (lương kỳ vọng, notice period, lý do chuyển việc) để AI gợi ý **2–3 gạch đầu dòng tiếng Anh B1 tự nhiên, dễ nói**, tuyệt đối không bịa đặt kinh nghiệm.
 - **Chống lộ khi share màn hình:** Cửa sổ overlay trong suốt (`setContentProtection`), luôn nổi cạnh webcam và bật xuyên chuột (`Ctrl + M`).
 - **Tích hợp sẵn CLI & Agent Skill (`skills/interview-bridge/SKILL.md`):** Dùng qua `npx`, PowerShell 1 dòng, file `.exe` cài đặt trực tiếp hoặc qua Claude Code / Antigravity / Cursor.
 
@@ -49,11 +49,12 @@ Sau đó mở app bằng `start.bat`.
 
 ```mermaid
 flowchart LR
-    Audio["System Audio (Zoom / Meet / Teams)"] --> LCT["LiveCaptions-Translator (0ms EN->VI Subtitles)"]
-    Audio --> App["InterviewBridge AI App (Electron Overlay)"]
+    Audio["System Audio (Zoom / Meet / Teams)"] --> CT2["CTranslate2 GPU Engine (faster-whisper + Idiom NLLB-200)"]
+    CT2 --> LCT["LiveCaptions-Translator (Instant VI Subtitles)"]
+    CT2 --> App["InterviewBridge AI App (Dual EN + VI Banner)"]
     Inputs["CV + JD + HR Quick Facts (.pdf / .docx / .md)"] --> Sync["CV + JD Studio / CLI / context_builder.py"]
     Sync --> App
-    App --> Out["1-Line VI Summary + 3 Spoken B1-B2 Bullets"]
+    App --> Out["1-Line VI Summary + 100% CV-Grounded B1 Bullets"]
 ```
 
 ---
@@ -92,7 +93,9 @@ InterviewBridge-AI/
 ├── cli/
 │   └── index.js                 # Bảng điều khiển CLI & trình cài Skill (zero dependencies)
 ├── scripts/
-│   └── context_builder.py       # Trích xuất PDF/DOCX/MD/TXT & đồng bộ cấu hình app
+│   ├── context_builder.py       # Trích xuất PDF/DOCX/MD/TXT & đồng bộ cấu hình app
+│   └── ct2_engine.py            # CTranslate2 GPU Engine (faster-whisper + NLLB-200 :8989)
+├── requirements-ct2.txt         # Thư viện Python cho CTranslate2 GPU & CUDA 12
 ├── skills/
 │   └── interview-bridge/
 │       └── SKILL.md             # Agent Skill cho Claude Code / Antigravity / Cursor

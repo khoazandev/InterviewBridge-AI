@@ -17,8 +17,8 @@ export class AssistantView extends LitElement {
 
         .live-transcript-bar {
             display: flex;
-            align-items: flex-start;
-            gap: 8px;
+            flex-direction: column;
+            gap: 4px;
             background: var(--bg-surface);
             border-bottom: 1px solid var(--border);
             padding: 8px 14px;
@@ -27,8 +27,21 @@ export class AssistantView extends LitElement {
             user-select: text;
         }
 
+        .live-transcript-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+
         .live-transcript-label {
             color: var(--accent);
+            font-weight: var(--font-weight-semibold);
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .live-translation-label {
+            color: var(--success);
             font-weight: var(--font-weight-semibold);
             white-space: nowrap;
             flex-shrink: 0;
@@ -337,6 +350,7 @@ export class AssistantView extends LitElement {
         responses: { type: Array },
         currentResponseIndex: { type: Number },
         liveTranscript: { type: String },
+        liveTranslation: { type: String },
         selectedProfile: { type: String },
         onSendText: { type: Function },
         shouldAnimateResponse: { type: Boolean },
@@ -348,6 +362,7 @@ export class AssistantView extends LitElement {
         this.responses = [];
         this.currentResponseIndex = -1;
         this.liveTranscript = '';
+        this.liveTranslation = '';
         this.selectedProfile = 'hr_bilingual';
         this.onSendText = () => {};
         this.isAnalyzing = false;
@@ -706,10 +721,18 @@ export class AssistantView extends LitElement {
 
         return html`
             <div class="live-transcript-bar">
-                <span class="live-transcript-label">🎧 HR (EN):</span>
-                <span class="live-transcript-text ${this.liveTranscript ? '' : 'empty'}">
-                    ${this.liveTranscript || 'Waiting for interviewer speech...'}
-                </span>
+                <div class="live-transcript-row">
+                    <span class="live-transcript-label">🎧 HR (EN):</span>
+                    <span class="live-transcript-text ${this.liveTranscript ? '' : 'empty'}">
+                        ${this.liveTranscript || 'Waiting for interviewer speech...'}
+                    </span>
+                </div>
+                ${this.liveTranslation ? html`
+                    <div class="live-transcript-row">
+                        <span class="live-translation-label">⚡ Dịch tức thì (CT2):</span>
+                        <span class="live-transcript-text">${this.liveTranslation}</span>
+                    </div>
+                ` : ''}
             </div>
 
             <div class="response-container" id="responseContainer"></div>

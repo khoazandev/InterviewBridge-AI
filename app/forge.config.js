@@ -4,7 +4,7 @@ const { FuseV1Options, FuseVersion } = require('@electron/fuses');
 module.exports = {
     packagerConfig: {
         asar: true,
-        extraResource: ['./src/assets/SystemAudioDump', '../scripts/context_builder.py'],
+        extraResource: ['./src/assets/SystemAudioDump', '../scripts/context_builder.py', '../scripts/ct2_engine.py'],
         name: 'InterviewBridge AI',
         icon: 'src/assets/logo',
         // use `security find-identity -v -p codesigning` to find your identity
