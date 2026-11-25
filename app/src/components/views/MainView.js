@@ -11,6 +11,8 @@ const LOCAL_LLM_PRESETS = [
     { value: 'unsloth/Qwen3.5-9B-GGUF:Q8_0', label: 'Qwen 3.5 9B Q8 — 10.45 GB' },
     { value: 'unsloth/Qwen3.5-27B-GGUF:Q4_K_M', label: 'Qwen 3.5 27B Q4 — 17.67 GB' },
     { value: 'unsloth/Qwen3.5-35B-A3B-GGUF:Q4_K_M', label: 'Qwen 3.5 35B-A3B Q4 — 22.92 GB · Largest' },
+    { value: 'ollama:qwen2.5:7b', label: 'Ollama — qwen2.5:7b (Requires Ollama running on :11434)' },
+    { value: 'ollama:llama3.2:3b', label: 'Ollama — llama3.2:3b (Fastest Ollama model)' },
 ];
 
 export class MainView extends LitElement {
@@ -1307,7 +1309,7 @@ export class MainView extends LitElement {
                                 ? html`
                                       <input
                                           type="text"
-                                          placeholder="owner/repository:quant or /absolute/model.gguf"
+                                          placeholder="ollama:qwen2.5:7b, owner/repository:quant, or /absolute/model.gguf"
                                           .value=${this._localLlmModel}
                                           @input=${event => this._saveLocalLlmModel(event.target.value)}
                                       />

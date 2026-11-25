@@ -39,6 +39,13 @@ const VAD_MODES = {
 let vadConfig = VAD_MODES.VERY_AGGRESSIVE;
 let resampleRemainder = Buffer.alloc(0);
 
+function parseOllamaModel(modelRef) {
+    if (typeof modelRef === 'string' && modelRef.trim().toLowerCase().startsWith('ollama:')) {
+        return modelRef.trim().slice(7).trim();
+    }
+    return null;
+}
+
 function resample24kTo16k(inputBuffer) {
     const combined = Buffer.concat([resampleRemainder, inputBuffer]);
     const inputSamples = Math.floor(combined.length / 2);
@@ -217,18 +224,22 @@ async function requestLlama(messages, onText) {
         throw new Error('Llama server is not running');
     }
 
+    const ollamaTag = parseOllamaModel(llamaModel);
+    const payload = {
+        model: ollamaTag || 'local',
+        messages,
+        stream: true,
+        temperature: 0.2,
+        max_tokens: 2048,
+    };
+    if (!ollamaTag) {
+        payload.chat_template_kwargs = { enable_thinking: false };
+    }
+
     const response = await fetch(`${llamaBaseUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            model: 'local',
-            messages,
-            stream: true,
-            max_tokens: 2048,
-            chat_template_kwargs: {
-                enable_thinking: false,
-            },
-        }),
+        body: JSON.stringify(payload),
     });
 
     if (!response.ok || !response.body) {
@@ -434,16 +445,51 @@ async function initializeLocalSession(model, whisperModel, profile, customPrompt
         currentSystemPrompt = getSystemPrompt(profile, customPrompt, false);
         llamaModel = model;
 
-        const nativeFiles = await prepareNativeFiles(model, whisperModel, initializationController.signal);
-        validatePreparedNativeFiles(nativeFiles);
+        const ollamaTag = parseOllamaModel(model);
+        if (ollamaTag) {
+            const ollamaHost = (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/$/, '');
+            try {
+                const ping = await fetch(`${ollamaHost}/api/tags`, { signal: initializationController.signal });
+                if (!ping.ok) throw new Error(`HTTP ${ping.status}`);
+            } catch (err) {
+                if (err.name === 'AbortError') throw err;
+                throw new Error(
+                    'Ollama is not running on 127.0.0.1:11434. Start Ollama first, or select a built-in Qwen 3.5 GGUF model (no Ollama needed).'
+                );
+            }
 
-        sendToRenderer('update-status', 'Starting Whisper...');
-        sendDownloadProgress('Starting Whisper');
-        await startWhisperServer(nativeFiles.whisperBinaryPath, nativeFiles.whisperModelPath);
+            const progressCb = label => progress => {
+                sendToRenderer('update-status', formatDownloadStatus(label, progress));
+                sendDownloadProgress(label, progress);
+            };
+            sendDownloadProgress('Checking Whisper runner');
+            const whisperBinaryPath = await ensureNativeBinary('whisper', progressCb('Whisper runner'), initializationController.signal);
 
-        sendToRenderer('update-status', 'Loading local language model...');
-        sendDownloadProgress('Loading language model');
-        await startLlamaServer(nativeFiles.llamaBinaryPath, nativeFiles.llamaModelPath, nativeFiles.projectorPath);
+            let whisperModelPath;
+            sendToRenderer('whisper-downloading', true);
+            try {
+                sendDownloadProgress('Checking Whisper model');
+                whisperModelPath = await ensureWhisperModel(whisperModel, progressCb('Whisper model'), initializationController.signal);
+            } finally {
+                sendToRenderer('whisper-downloading', false);
+            }
+
+            sendToRenderer('update-status', 'Starting Whisper...');
+            sendDownloadProgress('Starting Whisper');
+            await startWhisperServer(whisperBinaryPath, whisperModelPath);
+            llamaBaseUrl = ollamaHost;
+        } else {
+            const nativeFiles = await prepareNativeFiles(model, whisperModel, initializationController.signal);
+            validatePreparedNativeFiles(nativeFiles);
+
+            sendToRenderer('update-status', 'Starting Whisper...');
+            sendDownloadProgress('Starting Whisper');
+            await startWhisperServer(nativeFiles.whisperBinaryPath, nativeFiles.whisperModelPath);
+
+            sendToRenderer('update-status', 'Loading local language model...');
+            sendDownloadProgress('Loading language model');
+            await startLlamaServer(nativeFiles.llamaBinaryPath, nativeFiles.llamaModelPath, nativeFiles.projectorPath);
+        }
 
         isSpeaking = false;
         speechBuffers = [];
@@ -527,11 +573,12 @@ function isLocalSessionActive() {
 }
 
 async function sendLocalText(text) {
-    if (!isLocalActive || !llamaProcess) {
+    if (!isLocalActive || !llamaBaseUrl) {
         return { success: false, error: 'No active local session' };
     }
 
     try {
+        sendToRenderer('live-transcript', text.trim());
         await sendToLlama(text);
         return { success: true };
     } catch (error) {
@@ -540,7 +587,7 @@ async function sendLocalText(text) {
 }
 
 async function sendLocalImage(base64Data, prompt) {
-    if (!isLocalActive || !llamaProcess) {
+    if (!isLocalActive || !llamaBaseUrl) {
         return { success: false, error: 'No active local session' };
     }
 
